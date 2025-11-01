@@ -1,0 +1,12 @@
+{
+  "StackName": "dotnet-multi-repo-pipeline",
+  "Parameters": {
+    "BitbucketWorkspace": "<YOUR_BITBUCKET_WORKSPACE>",
+    "CodeStarConnectionArn": "<YOUR_CODESTAR_CONNECTION_ARN>",
+    "PipelineRepoName": "baseRepo",
+    "AppRepoName": "Core",
+    "DepRepoNames": "mongo-db,address-val,redshift,oracle,sql,polly,aws-s3,secret-manager",
+    "ArtifactBucketName": "",
+    "DepRepoMaxCount": "8"
+  }
+}

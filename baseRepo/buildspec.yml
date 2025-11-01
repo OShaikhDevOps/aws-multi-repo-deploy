@@ -1,0 +1,51 @@
+version: 0.2
+
+env:
+  variables:
+    DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    BUILD_CONFIGURATION: Release
+
+phases:
+  install:
+    runtime-versions:
+      dotnet: 8
+    commands:
+      - echo Installing additional tools (sonar scanner, trivy) - ensure installed in the image or add install commands here
+
+  pre_build:
+    commands:
+      - echo Restoring NuGet packages
+      - dotnet restore
+      # SonarQube scanner placeholder (requires SONAR_HOST_URL, SONAR_TOKEN env vars)
+      - echo Starting SonarQube analysis (placeholder)
+
+  build:
+    commands:
+      - echo Building solution
+      - dotnet build --configuration $BUILD_CONFIGURATION --no-restore
+
+  post_build:
+    commands:
+      - echo Running tests
+      - dotnet test --configuration $BUILD_CONFIGURATION --no-build --verbosity normal
+      # End SonarQube placeholder
+      - echo Finishing SonarQube analysis (placeholder)
+      # dotnet sonarscanner end /d:sonar.login="$SONAR_TOKEN"
+
+      - echo Publishing artifact
+      - dotnet publish -c $BUILD_CONFIGURATION -o publish
+
+      - echo Running Trivy filesystem scan (placeholder)
+      - if (Test-Path env:TRIVY) { echo "Trivy configured" } else { echo "Install or configure Trivy in image" }
+
+      - echo Packing artifact
+      - powershell -Command "Add-Type -AssemblyName 'System.IO.Compression.FileSystem'; [IO.Compression.ZipFile]::CreateFromDirectory('publish', 'artifact.zip')"
+
+artifacts:
+  files:
+    - artifact.zip
+    - web.config
+
+cache:
+  paths:
+    - ~/.nuget/packages

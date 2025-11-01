@@ -1,0 +1,26 @@
+version: 0.0
+os: windows
+files:
+  - source: artifact.zip
+    destination: C:\\inetpub\\mywebapi
+
+hooks:
+  BeforeInstall:
+    - location: scripts\BeforeInstall.ps1
+      timeout: 300
+      runas: Administrator
+
+  AfterInstall:
+    - location: scripts\AfterInstall.ps1
+      timeout: 300
+      runas: Administrator
+
+  ApplicationStart:
+    - location: scripts\StartApp.ps1
+      timeout: 300
+      runas: Administrator
+
+  ValidateService:
+    - location: scripts\Validate.ps1
+      timeout: 60
+      runas: Administrator

@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Skeleton CloudFormation template for CodePipeline wiring multiple Bitbucket (CodeStar Connection) sources,
+  CodeBuild build projects, and CodeDeploy Blue/Green deployment to EC2.
+
+# NOTE: This template is a more complete, parameterized skeleton. Fill in repository names, branches
+# and the CodeStar Connection ARN. The template creates an S3 artifact bucket, IAM roles for
+# CodePipeline/CodeBuild/CodeDeploy and a pipeline with multiple Bitbucket (CodeStar Connection)
+# source actions. Review and tighten IAM policies before use.
+
+Parameters:
+  CodeStarConnectionArn:
+    Type: String
+    Description: ARN of the CodeStar Connection to Bitbucket
+  BitbucketWorkspace:
+    Type: String
+    Description: Your Bitbucket workspace ID (used for FullRepositoryId construction)
+  PipelineRepoName:
+    Type: String
+    Description: Repository name for the pipeline repo (e.g. pipeline-repo)
+    Default: baseRepo
+  AppRepoName:
+    Type: String
+    Description: Repository name for the application repo (e.g. app-repo)
+    Default: Core
+  DepRepoNames:
+    Type: CommaDelimitedList
+    Default: "mongo-db,address-val,redshift,oracle,sql,polly,aws-s3,secret-manager"
+    Description: Comma-separated dependency repo names (example list matching screenshot)
+  DepRepoMaxCount:
+    Type: Number
+    Default: 8
+    Description: Maximum number of dependency repos to expect. CloudFormation cannot dynamically loop; this value determines how many DepRepoN actions are provisioned. If you have fewer repos, pass empty strings for unused positions in `DepRepoNames` or use Terraform which supports dynamic lists.
+  ArtifactBucketName:
+    Type: String
+    Default: ""
+    Description: Optional explicit S3 bucket name for pipeline artifacts. Leave blank to create a bucket.
+
+Resources:
+  PipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateArtifactBucket
+    Properties:
+      BucketName: !If [IsArtifactBucketProvided, !Ref ArtifactBucketName, !Ref AWS::NoValue]
+      VersioningConfiguration:
+        Status: Enabled
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateArtifactBucket
+    Properties:
+      Bucket: !Ref PipelineArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${PipelineArtifactBucket.Arn}/*'
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-CodeBuildRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${PipelineArtifactBucket}/*'
+
+  AppCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-app-build'
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: 'aws/codebuild/windows-base:latest'
+        Type: WINDOWS_CONTAINER
+        EnvironmentVariables:
+          - Name: BUILD_CONFIGURATION
+            Value: Release
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+
+  # CodeDeploy Application
+  AppCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: dotnet-iis-app
+      ComputePlatform: Server
+
+  # CodeDeploy DeploymentGroup (Blue/Green)
+  AppDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref AppCodeDeployApplication
+      DeploymentGroupName: dotnet-iis-dg
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 5
+      LoadBalancerInfo:
+        ElbInfoList: []
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-PipelineRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${PipelineArtifactBucket}/*'
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: '*'
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-CodeDeployRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodeDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${PipelineArtifactBucket}/*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:CompleteLifecycleAction
+                Resource: '*'
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-dotnet-multi-repo-pipeline'
+      RoleArn: !GetAtt PipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !If [CreateArtifactBucket, !Ref PipelineArtifactBucket, !Ref ArtifactBucketName]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: PipelineRepoSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionArn
+                FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Ref PipelineRepoName]]
+                BranchName: master
+              OutputArtifacts:
+                - Name: PipelineRepoOutput
+              RunOrder: 1
+            - Name: AppRepoSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionArn
+                FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Ref AppRepoName]]
+                BranchName: master
+              OutputArtifacts:
+                - Name: AppRepoOutput
+              RunOrder: 2
+            # Dependency repo source actions are created up to DepRepoMaxCount.
+            # CloudFormation template uses the DepRepoNames list. Because CFN cannot loop dynamically,
+            # it provisions DepRepoMaxCount slots and you should pass empty strings for unused slots.
+            # The Terraform module provided in `infrastructure/terraform` supports dynamic counts and is
+            # recommended for production use.
+            - !If [CreateDepSource1, { Name: DepRepo1Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [0, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo1Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource2, { Name: DepRepo2Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [1, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo2Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource3, { Name: DepRepo3Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [2, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo3Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource4, { Name: DepRepo4Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [3, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo4Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource5, { Name: DepRepo5Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [4, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo5Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource6, { Name: DepRepo6Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [5, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo6Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource7, { Name: DepRepo7Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [6, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo7Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+            - !If [CreateDepSource8, { Name: DepRepo8Source, ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }, Configuration: { ConnectionArn: !Ref CodeStarConnectionArn, FullRepositoryId: !Join ["/", [!Ref BitbucketWorkspace, !Select [7, !Ref DepRepoNames]]], BranchName: master }, OutputArtifacts: [ { Name: DepRepo8Output } ], RunOrder: 3 }, !Ref AWS::NoValue]
+        - Name: Build
+          Actions:
+            - Name: AppBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: AppRepoOutput
+                - Name: DepRepo1Output
+                - Name: DepRepo2Output
+                - Name: DepRepo3Output
+                - Name: DepRepo4Output
+                - Name: DepRepo5Output
+                - Name: DepRepo6Output
+                - Name: DepRepo7Output
+                - Name: DepRepo8Output
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref AppCodeBuildProject
+              RunOrder: 1
+        - Name: Prep
+          Actions:
+            - Name: AnsiblePrep
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: PipelineRepoOutput
+              Configuration:
+                ProjectName: !Ref AppCodeBuildProject
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: CodeDeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: '1'
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ApplicationName: !Ref AppCodeDeployApplication
+                DeploymentGroupName: !Ref AppDeploymentGroup
+              RunOrder: 1
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+    Description: Name of the CodePipeline
+
+Conditions:
+  IsArtifactBucketProvided: !Not [!Equals [!Ref ArtifactBucketName, ""]]
+  CreateArtifactBucket: !Not [!Condition IsArtifactBucketProvided]
+  CreateDepSource1: !Not [!Equals [!Select [0, !Ref DepRepoNames], ""]]
+  CreateDepSource2: !Not [!Equals [!Select [1, !Ref DepRepoNames], ""]]
+  CreateDepSource3: !Not [!Equals [!Select [2, !Ref DepRepoNames], ""]]
+  CreateDepSource4: !Not [!Equals [!Select [3, !Ref DepRepoNames], ""]]
+  CreateDepSource5: !Not [!Equals [!Select [4, !Ref DepRepoNames], ""]]
+  CreateDepSource6: !Not [!Equals [!Select [5, !Ref DepRepoNames], ""]]
+  CreateDepSource7: !Not [!Equals [!Select [6, !Ref DepRepoNames], ""]]
+  CreateDepSource8: !Not [!Equals [!Select [7, !Ref DepRepoNames], ""]]
+
+Conditions:
+  IsArtifactBucketProvided: !Not [!Equals [!Ref ArtifactBucketName, ""]]
+  CreateArtifactBucket: !Not [!Condition IsArtifactBucketProvided]
+
+# Add IAM Roles, policies, and additional CodeBuild projects for Sonar/Trivy if required.
