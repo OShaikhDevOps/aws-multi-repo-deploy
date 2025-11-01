@@ -56,5 +56,3 @@ If you want, I can:
 - produce a `terraform.tfvars.example` from the CloudFormation parameters file,
 - update S3 resource to remove provider deprecation warnings,
 - or run a dry `terraform plan` locally and paste the output here (I cannot run Terraform in your environment without your approval).
-
-License: MIT-style (adapt as needed)
